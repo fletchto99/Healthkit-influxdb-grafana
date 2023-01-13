@@ -24,7 +24,7 @@ app.debug = True
 def get_os_or_fail(env_var):
     res = os.getenv('INFLUX_DB')
     if res is None:
-        raise Exception(f"Environment variable {env_var} is not set")
+        sys.exit(f"Environment variable {env_var} is not set")
     return res
 
 INFLUX_DB = get_os_or_fail("INFLUX_DB")
