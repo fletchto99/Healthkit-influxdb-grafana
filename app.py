@@ -2,6 +2,7 @@ import json
 import sys
 import socket
 import logging
+import os
 from datetime import datetime
 from flask import request, Flask
 from influxdb import InfluxDBClient
@@ -20,14 +21,26 @@ logger.addHandler(handler)
 app = Flask(__name__)
 app.debug = True
 
-client = InfluxDBClient(host='localhost', port=8086)
-client.create_database('db')
-client.switch_database('db')
+def get_os_or_fail(env_var):
+    res = os.getenv('INFLUX_DB')
+    if res is None:
+        raise Exception(f"Environment variable {env_var} is not set")
+    return res
+
+INFLUX_DB = get_os_or_fail("INFLUX_DB")
+INFLUX_HOST = get_os_or_fail('INFLUX_HOST')
+INFLUX_PORT = get_os_or_fail('INFLUX_PORT')
+INFLUX_USER = get_os_or_fail('INFLUX_USER')
+INFLUX_PASS = get_os_or_fail('INFLUX_PASS')
+
+client = InfluxDBClient(username=INFLUX_USER, password=INFLUX_PASS, host=INFLUX_HOST, port=INFLUX_PORT)
+client.create_database(INFLUX_DB)
+client.switch_database(INFLUX_DB)
 
 @app.route('/collect', methods=['POST', 'GET'])
 def collect():
     logger.info(f"Request received")
-    
+
     healthkit_data = None
     transformed_data = []
 
@@ -35,7 +48,7 @@ def collect():
         healthkit_data = json.loads(request.data)
     except:
         return "Invalid JSON Received", 400
-    
+
     try:
         logger.info(f"Ingesting Metrics")
         for metric in healthkit_data.get("data", {}).get("metrics", []):
@@ -66,12 +79,12 @@ def collect():
         for i in range(0, len(transformed_data), DATAPOINTS_CHUNK):
             logger.info(f"DB Writing chunk")
             client.write_points(transformed_data[i:i + DATAPOINTS_CHUNK])
-        
+
         logger.info(f"DB Metrics Write Complete")
         logger.info(f"Ingesting Workouts Routes")
 
         transformed_workout_data = []
-        
+
         for workout in healthkit_data.get("data", {}).get("workouts", []):
             tags = {
                 "id": workout["name"] + "-" + workout["start"] + "-" + workout["end"]
@@ -92,7 +105,7 @@ def collect():
             for i in range(0, len(transformed_workout_data), DATAPOINTS_CHUNK):
                 logger.info(f"DB Writing chunk")
                 client.write_points(transformed_workout_data[i:i + DATAPOINTS_CHUNK])
-        
+
         logger.info(f"Ingesting Workouts Complete")
     except:
         logger.exception("Caught Exception. See stacktrace for details.")
