@@ -22,7 +22,7 @@ app = Flask(__name__)
 app.debug = True
 
 def get_os_or_fail(env_var):
-    res = os.getenv('INFLUX_DB')
+    res = os.getenv(env_var)
     if res is None:
         sys.exit(f"Environment variable {env_var} is not set")
     return res
