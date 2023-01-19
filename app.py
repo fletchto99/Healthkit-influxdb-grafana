@@ -21,21 +21,36 @@ logger.addHandler(handler)
 app = Flask(__name__)
 app.debug = True
 
+
 def get_os_or_fail(env_var):
     res = os.getenv(env_var)
     if res is None:
         sys.exit(f"Environment variable {env_var} is not set")
     return res
 
+
+def get_os_or_default(env_var, default):
+    res = os.getenv(env_var)
+    if res is None:
+        return default
+    return res
+
+
 INFLUX_DB = get_os_or_fail("INFLUX_DB")
 INFLUX_HOST = get_os_or_fail('INFLUX_HOST')
 INFLUX_PORT = get_os_or_fail('INFLUX_PORT')
 INFLUX_USER = get_os_or_fail('INFLUX_USER')
 INFLUX_PASS = get_os_or_fail('INFLUX_PASS')
+DEBUG_MODE = get_os_or_default('DEBUG_MODE', False)
 
-client = InfluxDBClient(username=INFLUX_USER, password=INFLUX_PASS, host=INFLUX_HOST, port=INFLUX_PORT)
+if DEBUG_MODE:
+    logger.info(f"Debug mode enabled")
+
+client = InfluxDBClient(
+    username=INFLUX_USER, password=INFLUX_PASS, host=INFLUX_HOST, port=INFLUX_PORT)
 client.create_database(INFLUX_DB)
 client.switch_database(INFLUX_DB)
+
 
 @app.route('/collect', methods=['POST', 'GET'])
 def collect():
@@ -49,6 +64,9 @@ def collect():
     except:
         return "Invalid JSON Received", 400
 
+    if DEBUG_MODE:
+        logger.info(f"Received Data: {healthkit_data}")
+
     try:
         logger.info(f"Ingesting Metrics")
         for metric in healthkit_data.get("data", {}).get("metrics", []):
@@ -56,19 +74,29 @@ def collect():
             string_fields = []
             for datapoint in metric["data"]:
                 metric_fields = set(datapoint.keys())
-                metric_fields.remove("date")
+                metric_fields.discard("date")
+                metric_fields.discard("startDate")
+                metric_fields.discard("endDate")
                 for mfield in metric_fields:
                     if type(datapoint[mfield]) == int or type(datapoint[mfield]) == float:
                         number_fields.append(mfield)
                     else:
                         string_fields.append(mfield)
-                point = {
-                    "measurement": metric["name"],
-                    "time": datapoint["date"],
-                    "tags": {str(nfield): str(datapoint[nfield]) for nfield in string_fields},
-                    "fields": {str(nfield): float(datapoint[nfield]) for nfield in number_fields}
-                }
-                transformed_data.append(point)
+                try:
+                    measurement_name = metric["name"]
+                    if metric["name"] == 'sleep_analysis':
+                        measurement_name += "_" + datapoint["value"].lower()
+                    point = {
+                        "measurement": measurement_name,
+                        "time": datapoint["date"] if "date" in datapoint else datapoint["startDate"],
+                        "tags": {str(nfield): str(datapoint[nfield]) for nfield in string_fields},
+                        "fields": {str(nfield): float(datapoint[nfield]) for nfield in number_fields}
+                    }
+                    transformed_data.append(point)
+                except:
+                    logger.exception(
+                        f"Error transforming datapoint: {datapoint}")
+                    raise
                 number_fields.clear()
                 string_fields.clear()
 
@@ -104,7 +132,8 @@ def collect():
 
             for i in range(0, len(transformed_workout_data), DATAPOINTS_CHUNK):
                 logger.info(f"DB Writing chunk")
-                client.write_points(transformed_workout_data[i:i + DATAPOINTS_CHUNK])
+                client.write_points(
+                    transformed_workout_data[i:i + DATAPOINTS_CHUNK])
 
         logger.info(f"Ingesting Workouts Complete")
     except:
@@ -112,6 +141,7 @@ def collect():
         return "Server Error", 500
 
     return "Success", 200
+
 
 if __name__ == "__main__":
     hostname = socket.gethostname()
