@@ -3,12 +3,10 @@ import sys
 import socket
 import logging
 import os
-from datetime import datetime
 from flask import request, Flask
-from influxdb import InfluxDBClient
+from influxdb_client import InfluxDBClient, Point
+from influxdb_client.client.write_api import SYNCHRONOUS
 from geolib import geohash
-
-DATAPOINTS_CHUNK = 80000
 
 logger = logging.getLogger("console-output")
 logger.setLevel(logging.DEBUG)
@@ -25,7 +23,7 @@ app.debug = True
 def get_os_or_fail(env_var):
     res = os.getenv(env_var)
     if res is None:
-        sys.exit(f"Environment variable {env_var} is not set")
+        sys.exit("Environment variable %s is not set", env_var)
     return res
 
 
@@ -36,28 +34,25 @@ def get_os_or_default(env_var, default):
     return res
 
 
-INFLUX_DB = get_os_or_fail("INFLUX_DB")
 INFLUX_HOST = get_os_or_fail('INFLUX_HOST')
 INFLUX_PORT = get_os_or_fail('INFLUX_PORT')
-INFLUX_USER = get_os_or_fail('INFLUX_USER')
-INFLUX_PASS = get_os_or_fail('INFLUX_PASS')
+INFLUX_ORG = get_os_or_fail("INFLUX_ORG")
+INFLUX_BUCKET = get_os_or_fail("INFLUX_BUCKET")
+INFLUX_TOKEN = get_os_or_fail('INFLUX_TOKEN')
 DEBUG_MODE = get_os_or_default('DEBUG_MODE', False)
 
 if DEBUG_MODE:
-    logger.info(f"Debug mode enabled")
+    logger.info("Debug mode enabled")
 
 client = InfluxDBClient(
-    username=INFLUX_USER, password=INFLUX_PASS, host=INFLUX_HOST, port=INFLUX_PORT)
-client.create_database(INFLUX_DB)
-client.switch_database(INFLUX_DB)
+    url=f"http://{INFLUX_HOST}:{INFLUX_PORT}", token=INFLUX_TOKEN, org=INFLUX_ORG)
 
 
 @app.route('/collect', methods=['POST', 'GET'])
 def collect():
-    logger.info(f"Request received")
+    logger.info("Request received")
 
     healthkit_data = None
-    transformed_data = []
 
     try:
         healthkit_data = json.loads(request.data)
@@ -65,77 +60,55 @@ def collect():
         return "Invalid JSON Received", 400
 
     if DEBUG_MODE:
-        logger.info(f"Received Data: {healthkit_data}")
+        logger.info("Received Data: %s", healthkit_data)
 
     try:
-        logger.info(f"Ingesting Metrics")
-        for metric in healthkit_data.get("data", {}).get("metrics", []):
-            number_fields = []
-            string_fields = []
-            for datapoint in metric["data"]:
-                metric_fields = set(datapoint.keys())
-                metric_fields.discard("date")
-                metric_fields.discard("startDate")
-                metric_fields.discard("endDate")
-                for mfield in metric_fields:
-                    if type(datapoint[mfield]) == int or type(datapoint[mfield]) == float:
-                        number_fields.append(mfield)
-                    else:
-                        string_fields.append(mfield)
-                try:
+        with client.write_api(write_options=SYNCHRONOUS) as write_api:
+            logger.info("Ingesting Metrics")
+            for metric in healthkit_data.get("data", {}).get("metrics", []):
+                for datapoint in metric["data"]:
+                    metric_fields = set(datapoint.keys())
+                    metric_fields.discard("date")
+                    metric_fields.discard("startDate")
+                    metric_fields.discard("endDate")
+
                     measurement_name = metric["name"]
                     if metric["name"] == 'sleep_analysis':
                         measurement_name += "_" + datapoint["value"].lower()
-                    point = {
-                        "measurement": measurement_name,
-                        "time": datapoint["date"] if "date" in datapoint else datapoint["startDate"],
-                        "tags": {str(nfield): str(datapoint[nfield]) for nfield in string_fields},
-                        "fields": {str(nfield): float(datapoint[nfield]) for nfield in number_fields}
-                    }
-                    transformed_data.append(point)
-                except:
-                    logger.exception(
-                        f"Error transforming datapoint: {datapoint}")
-                    raise
-                number_fields.clear()
-                string_fields.clear()
 
-        logger.info(f"Data Transformation Complete")
-        logger.info(f"Number of data points to write: {len(transformed_data)}")
-        logger.info(f"DB Write Started")
+                    point = Point(measurement_name)
 
-        for i in range(0, len(transformed_data), DATAPOINTS_CHUNK):
-            logger.info(f"DB Writing chunk")
-            client.write_points(transformed_data[i:i + DATAPOINTS_CHUNK])
+                    for mfield in metric_fields:
+                        if isinstance(datapoint[mfield], int) or isinstance(datapoint[mfield], float):
+                            point.field(mfield, datapoint[mfield])
+                        else:
+                            point.tag(mfield, datapoint[mfield])
 
-        logger.info(f"DB Metrics Write Complete")
-        logger.info(f"Ingesting Workouts Routes")
+                    point.time(
+                        datapoint["date"] if "date" in datapoint else datapoint["endDate"])
 
-        transformed_workout_data = []
+                    write_api.write(bucket=INFLUX_BUCKET, record=point)
 
-        for workout in healthkit_data.get("data", {}).get("workouts", []):
-            tags = {
-                "id": workout["name"] + "-" + workout["start"] + "-" + workout["end"]
-            }
-            for gps_point in workout["route"]:
-                point = {
-                    "measurement": "workouts",
-                    "time": gps_point["timestamp"],
-                    "tags": tags,
-                    "fields": {
-                        "lat": gps_point["lat"],
-                        "lng": gps_point["lon"],
-                        "geohash": geohash.encode(gps_point["lat"], gps_point["lon"], 7),
-                    }
-                }
-                transformed_workout_data.append(point)
+            logger.info("Done Ingesting Metrics")
+            logger.info("Ingesting Workouts")
 
-            for i in range(0, len(transformed_workout_data), DATAPOINTS_CHUNK):
-                logger.info(f"DB Writing chunk")
-                client.write_points(
-                    transformed_workout_data[i:i + DATAPOINTS_CHUNK])
+            for workout in healthkit_data.get("data", {}).get("workouts", []):
+                for gps_point in workout["route"]:
+                    point = Point("workouts")
 
-        logger.info(f"Ingesting Workouts Complete")
+                    point.tag("id", workout["name"] + "-" +
+                              workout["start"] + "-" + workout["end"])
+
+                    point.field("lat", gps_point["lat"])
+                    point.field("lng", gps_point["lon"])
+                    point.field("geohash", geohash.encode(
+                        gps_point["lat"], gps_point["lon"], 7))
+
+                    point.time(gps_point["timestamp"])
+
+                    write_api.write(bucket=INFLUX_BUCKET, record=point)
+
+            logger.info("Done Ingesting Workouts")
     except:
         logger.exception("Caught Exception. See stacktrace for details.")
         return "Server Error", 500
@@ -146,5 +119,5 @@ def collect():
 if __name__ == "__main__":
     hostname = socket.gethostname()
     ip_address = socket.gethostbyname(hostname)
-    logger.info(f"Local Network Endpoint: http://{ip_address}/collect")
+    logger.info("Local Network Endpoint: http://%s/collect", ip_address)
     app.run(host='0.0.0.0', port=5353)
