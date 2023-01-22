@@ -4,8 +4,7 @@ import socket
 import logging
 import os
 from flask import request, Flask
-from influxdb_client import InfluxDBClient, Point
-from influxdb_client.client.write_api import SYNCHRONOUS
+from influxdb_client import InfluxDBClient, Point, WriteOptions
 from geolib import geohash
 
 logger = logging.getLogger("console-output")
@@ -63,7 +62,7 @@ def collect():
         logger.info("Received Data: %s", healthkit_data)
 
     try:
-        with client.write_api(write_options=SYNCHRONOUS) as write_api:
+        with client.write_api(write_options=WriteOptions(batch_size=10_000, flush_interval=5_000)) as write_api:
             logger.info("Ingesting Metrics")
             for metric in healthkit_data.get("data", {}).get("metrics", []):
                 for datapoint in metric["data"]:
@@ -87,7 +86,8 @@ def collect():
                     point.time(
                         datapoint["date"] if "date" in datapoint else datapoint["endDate"])
 
-                    write_api.write(bucket=INFLUX_BUCKET, record=point)
+                    write_api.write(
+                        org=INFLUX_ORG, bucket=INFLUX_BUCKET, record=point)
 
             logger.info("Done Ingesting Metrics")
             logger.info("Ingesting Workouts")
@@ -106,7 +106,8 @@ def collect():
 
                     point.time(gps_point["timestamp"])
 
-                    write_api.write(bucket=INFLUX_BUCKET, record=point)
+                    write_api.write(
+                        org=INFLUX_ORG, bucket=INFLUX_BUCKET, record=point)
 
             logger.info("Done Ingesting Workouts")
     except:
