@@ -80,7 +80,7 @@ def collect():
 
                     for mfield in metric_fields:
                         if isinstance(datapoint[mfield], int) or isinstance(datapoint[mfield], float):
-                            point.field(mfield, datapoint[mfield])
+                            point.field(mfield, float(datapoint[mfield]))
                         else:
                             point.tag(mfield, datapoint[mfield])
 
